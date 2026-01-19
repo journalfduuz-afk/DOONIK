@@ -29,11 +29,11 @@ st.set_page_config(
 # 2) APP CONSTANTS
 # ==========================================
 THEME = "DARK_GOLD"
-DEMO_LIMIT_PAGES = 3           # ✅ demo (email kiritilmagan) uchun limit
-STARTER_CREDITS = 10           # ✅ email kiritgan foydalanuvchiga tekinga
+DEMO_LIMIT_PAGES = 3
+STARTER_CREDITS = 10
 HISTORY_LIMIT = 20
-BATCH_DELAY_RANGE = (0.8, 1.6) # ✅ 429 kamaytirish uchun (0.8–1.6s)
-MAX_OUT_TOKENS = 4096          # ✅ natija qisqarib qolmasligi uchun
+BATCH_DELAY_RANGE = (0.8, 1.6)
+MAX_OUT_TOKENS = 4096
 
 # ==========================================
 # 3) THEMES
@@ -52,7 +52,7 @@ THEMES = {
 C = THEMES["DARK_GOLD"]
 
 # ==========================================
-# 4) CSS (professional UI + premium feel)
+# 4) CSS
 # ==========================================
 st.markdown(f"""
 <style>
@@ -194,7 +194,6 @@ h1, h2, h3, h4 {{
 </style>
 """, unsafe_allow_html=True)
 
-
 # ==========================================
 # 5) SERVICES
 # ==========================================
@@ -206,7 +205,6 @@ db = get_db()
 
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 model = genai.GenerativeModel(model_name="gemini-flash-latest")  # o'zgarmaydi
-
 
 # ==========================================
 # 6) STATE
@@ -220,9 +218,8 @@ if "results" not in st.session_state: st.session_state.results = {}
 if "chats" not in st.session_state: st.session_state.chats = {}
 if "warn_db" not in st.session_state: st.session_state.warn_db = False
 
-
 # ==========================================
-# 7) HELPERS (render/cache/preprocess/ai/credits/logs/persist)
+# 7) HELPERS
 # ==========================================
 def pil_to_jpeg_bytes(img: Image.Image, quality: int = 90, max_side: int = 2800) -> bytes:
     img = img.convert("RGB")
@@ -255,14 +252,10 @@ def preprocess_bytes(img_bytes: bytes, brightness: float, contrast: float, rotat
     img = ImageOps.exif_transpose(img)
     if rotate:
         img = img.rotate(rotate, expand=True)
-
     img = ImageEnhance.Brightness(img).enhance(brightness)
     img = ImageEnhance.Contrast(img).enhance(contrast)
-
-    # ✅ yengil sharpen (qo'lyozma uchun foydali)
     if sharpen > 0:
         img = img.filter(ImageFilter.UnsharpMask(radius=2, percent=int(120 * sharpen), threshold=2))
-
     return pil_to_jpeg_bytes(img, quality=90, max_side=2800)
 
 def parse_pages(spec: str, max_n: int) -> list[int]:
@@ -310,7 +303,6 @@ def call_gemini_with_retry(prompt: str, payloads: list[dict], tries: int = 3) ->
     raise RuntimeError("So'rovlar ko'p (429). Birozdan keyin qayta urinib ko'ring.") from last_err
 
 def ensure_profile(email: str) -> None:
-    """Email kiritilganda profil bo'lmasa yaratadi (STARTER_CREDITS)."""
     try:
         existing = db.table("profiles").select("email,credits").eq("email", email).limit(1).execute()
         if existing.data:
@@ -328,18 +320,11 @@ def get_credits(email: str) -> int:
         return 0
 
 def consume_credit_safe(email: str, n: int = 1) -> bool:
-    """
-    1) Avval RPC consume_credits bo'lsa ishlatadi
-    2) Ishlamasa: CAS (compare-and-swap) usulida credits-ni kamaytiradi
-    """
-    # Try RPC first
     try:
         r = db.rpc("consume_credits", {"p_email": email, "p_n": n}).execute()
         return bool(r.data)
     except Exception:
         pass
-
-    # Fallback CAS
     for _ in range(2):
         try:
             cur = get_credits(email)
@@ -360,7 +345,6 @@ def refund_credit_safe(email: str, n: int = 1) -> None:
         return
     except Exception:
         pass
-    # fallback: add back
     for _ in range(2):
         try:
             cur = get_credits(email)
@@ -397,7 +381,6 @@ def save_report(email: str, doc_name: str, page_index: int, result_text: str) ->
             on_conflict="email,doc_name,page_index"
         ).execute()
     except Exception:
-        # agar constraint bo'lmasa ham, insert qilamiz (eng kamida saqlansin)
         try:
             db.table("reports").insert({
                 "email": email,
@@ -446,17 +429,42 @@ def aggregate_detected_meta(results: dict[int, str]) -> dict:
 
 
 # ============================
-# ANALYSIS QUALITY PATCH (ONLY ANALYSIS)
+# ANALYSIS QUALITY PATCH (Tez / To‘liq) - FAQAT TAHLIL LOGIKASI
 # ============================
-# Eslatma: mavjud funksiyalarga tegilmaydi. Bu helperlar faqat RUN analysis ichida ishlatiladi.
-
-OCR_STRIPS_DEFAULT = 10
-OCR_STRIPS_RETRY = 13
 OCR_OVERLAP = 0.12
-OCR_STRIP_SLEEP = (0.25, 0.55)  # strip orasida yengil delay (429 kamayadi)
+
+def get_analysis_cfg(mode: str) -> dict:
+    mode = (mode or "Tez").strip()
+    if mode == "To‘liq":
+        return {
+            "min_chars": 650,
+            "strips_default": 10,
+            "strips_retry": 13,
+            "strip_sleep": (0.18, 0.38),
+            "max_calls": 30,
+            "chunk_chars": 2200,
+            "max_chunks": 8,
+        }
+    return {
+        "min_chars": 420,
+        "strips_default": 6,
+        "strips_retry": 9,
+        "strip_sleep": (0.12, 0.28),
+        "max_calls": 18,
+        "chunk_chars": 3200,
+        "max_chunks": 5,
+    }
+
+def _safe_model_call_budget_guard(counter: dict, add: int = 1, max_calls: int = 18):
+    counter["n"] = int(counter.get("n", 0)) + int(add)
+    if counter["n"] > int(max_calls):
+        raise RuntimeError("Sahifa bo‘yicha AI chaqiruv limiti oshdi (xavfsizlik).")
+
+def _call_gemini_guarded(prompt: str, payloads: list[dict], call_budget: dict, cfg: dict, tries: int = 3) -> str:
+    _safe_model_call_budget_guard(call_budget, 1, max_calls=int(cfg.get("max_calls", 18)))
+    return call_gemini_with_retry(prompt, payloads, tries=tries)
 
 def _split_two_pages_if_wide(img: Image.Image) -> list[Image.Image]:
-    """Agar rasm juda keng bo'lsa (2 bet skan), chap/o'ngga ajratadi."""
     w, h = img.size
     if w >= int(h * 1.15):
         mid = w // 2
@@ -464,7 +472,6 @@ def _split_two_pages_if_wide(img: Image.Image) -> list[Image.Image]:
     return [img]
 
 def _split_vertical_strips(img: Image.Image, n: int, overlap: float) -> list[Image.Image]:
-    """Bitta betni yuqoridan pastga n ta bo'lak qilib beradi (overlap bilan)."""
     w, h = img.size
     step = h / float(max(n, 1))
     ov = int(step * overlap)
@@ -480,14 +487,12 @@ def _jpeg_payload_from_pil(img: Image.Image) -> dict:
     return {"mime_type": "image/jpeg", "data": base64.b64encode(jb).decode("utf-8")}
 
 def has_read_sections(text: str) -> bool:
-    """READ bosqichi: 0) Tashxis va 1) Transliteratsiya bo'lishi shart."""
     if not text:
         return False
     t = text.lower()
     return ("0) tashxis" in t) and ("1) transliteratsiya" in t)
 
 def has_final_sections(text: str) -> bool:
-    """FINAL natijada 0-6 bo'limlar bo'lishi shart (sizning format)."""
     if not text:
         return False
     must = [
@@ -503,17 +508,12 @@ def has_final_sections(text: str) -> bool:
     return all(m.lower() in t for m in must)
 
 def extract_diag_block(read_text: str) -> str:
-    """0) Tashxis blokini ajratib beradi (0) dan 1) gacha). Topilmasa bo'sh."""
     if not read_text:
         return ""
     m = re.search(r"(0\)\s*Tashxis[\s\S]+?)(?=\n\s*1\)\s*Transliteratsiya)", read_text, flags=re.IGNORECASE)
     return (m.group(1).strip() if m else "").strip()
 
 def extract_translit_lines(read_text: str) -> str:
-    """
-    1) Transliteratsiya ichidagi SATRLARNI ajratadi (headinglarsiz).
-    Topilmasa bo'sh qaytaradi.
-    """
     if not read_text:
         return ""
     m = re.search(r"1\)\s*Transliteratsiya[^\n]*\n([\s\S]+)", read_text, flags=re.IGNORECASE)
@@ -522,7 +522,6 @@ def extract_translit_lines(read_text: str) -> str:
     return m.group(1).strip()
 
 def build_read_text(diag_block: str, translit_lines: str) -> str:
-    """Yagona READ natija: 0) tashxis + 1) transliteratsiya (toza)."""
     diag = (diag_block or "").strip()
     tl = (translit_lines or "").strip()
     if not diag:
@@ -537,22 +536,14 @@ def build_read_text(diag_block: str, translit_lines: str) -> str:
     return f"{diag}\n\n1) Transliteratsiya (satrma-satr, to‘liq):\n{tl}".strip()
 
 def translit_min_len_ok(translit_lines: str, min_chars: int = 600) -> bool:
-    """Transliteratsiya juda qisqa bo'lib qolmasin."""
     return bool(translit_lines and len(translit_lines.strip()) >= int(min_chars))
 
-def read_transliteration_with_strips(p_read: str, img_bytes: bytes, strips_n: int) -> tuple[str, str]:
-    """
-    Strip OCR: faqat transliteratsiya satrlarini yig'adi.
-    Qaytaradi: (diag_block, translit_lines)
-    Xavfsizlik: xato bo'lsa bo'sh qaytaradi (fallback ishlaydi).
-    """
+def read_transliteration_with_strips(p_read: str, img_bytes: bytes, strips_n: int, min_chars: int, call_budget: dict, cfg: dict) -> tuple[str, str]:
     try:
-        # 1) Avval tashxisni bir marta olishga harakat (oddiy payload bilan)
         payload_full = {"mime_type": "image/jpeg", "data": base64.b64encode(img_bytes).decode("utf-8")}
-        read0 = call_gemini_with_retry(p_read, [payload_full], tries=2).strip()
+        read0 = _call_gemini_guarded(p_read, [payload_full], call_budget, cfg, tries=2).strip()
         diag_block = extract_diag_block(read0)
 
-        # 2) Endi transliteratsiyani strip qilib maksimal to'liq yig'amiz (faqat satrlar)
         pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         pages = _split_two_pages_if_wide(pil)
 
@@ -570,17 +561,19 @@ def read_transliteration_with_strips(p_read: str, img_bytes: bytes, strips_n: in
                       "- O‘qilmasa: [o‘qilmadi] yoki [?].\n"
                     + f"\n(Bo‘lak: bet {p_i}, {s_i}/{len(strips)})"
                 )
-                txt = call_gemini_with_retry(strip_prompt, [payload], tries=2).strip()
+                txt = _call_gemini_guarded(strip_prompt, [payload], call_budget, cfg, tries=2).strip()
                 if txt:
                     all_lines.append(txt)
-                time.sleep(random.uniform(*OCR_STRIP_SLEEP))
+                time.sleep(random.uniform(*cfg.get("strip_sleep", (0.12, 0.28))))
 
         translit_lines = "\n".join([x for x in all_lines if x.strip()]).strip()
+        if not translit_min_len_ok(translit_lines, min_chars=min_chars):
+            return diag_block, translit_lines
         return diag_block, translit_lines
     except Exception:
         return "", ""
 
-def chunk_text_safe(text: str, chunk_chars: int = 2200, overlap: int = 120) -> list[str]:
+def chunk_text_safe(text: str, chunk_chars: int = 2200, overlap: int = 120, max_chunks: int | None = None) -> list[str]:
     t = (text or "").strip()
     if len(t) <= chunk_chars:
         return [t]
@@ -589,25 +582,26 @@ def chunk_text_safe(text: str, chunk_chars: int = 2200, overlap: int = 120) -> l
     while i < len(t):
         j = min(len(t), i + chunk_chars)
         out.append(t[i:j])
+        if max_chunks is not None and len(out) >= int(max_chunks):
+            break
         if j >= len(t):
             break
         i = max(0, j - overlap)
     return out
 
 def _extract_tag(resp: str, tag: str) -> str:
-    """<TAG>...</TAG> ichini oladi."""
     if not resp:
         return ""
     m = re.search(rf"<{tag}>([\s\S]+?)</{tag}>", resp, flags=re.IGNORECASE)
     return (m.group(1).strip() if m else "").strip()
 
-def translate_2_3_chunked(translit_lines: str) -> tuple[str, str]:
-    """
-    2) To'g'ridan-to'g'ri tarjima + 3) Akademik tarjima
-    Chunk bilan: truncation kamayadi.
-    Xavfsizlik: agar tag parse bo'lmasa, rawni ishlatadi.
-    """
-    chunks = chunk_text_safe(translit_lines, chunk_chars=1800, overlap=120)
+def translate_2_3_chunked(translit_lines: str, call_budget: dict, cfg: dict) -> tuple[str, str]:
+    chunks = chunk_text_safe(
+        translit_lines,
+        chunk_chars=int(cfg.get("chunk_chars", 3200)),
+        overlap=160,
+        max_chunks=int(cfg.get("max_chunks", 5))
+    )
     direct_parts: list[str] = []
     acad_parts: list[str] = []
 
@@ -627,25 +621,19 @@ def translate_2_3_chunked(translit_lines: str) -> tuple[str, str]:
             "TRANSLITERATSIYA:\n"
             f"{ch}\n"
         )
-        resp = call_gemini_with_retry(prompt, [], tries=3).strip()
+        resp = _call_gemini_guarded(prompt, [], call_budget, cfg, tries=3).strip()
         d = _extract_tag(resp, "D") or resp
         a = _extract_tag(resp, "A") or ""
         direct_parts.append(d.strip())
         if a.strip():
             acad_parts.append(a.strip())
-        time.sleep(random.uniform(0.25, 0.6))
+        time.sleep(random.uniform(0.18, 0.45))
 
     direct = "\n".join([x for x in direct_parts if x.strip()]).strip()
     acad = "\n".join([x for x in acad_parts if x.strip()]).strip()
+    return direct, acad
 
-    # Agar A bo'sh bo'lib qolsa (tag chiqmasa), directni hech bo'lmasa qaytaramiz
-    return direct, (acad or "")
-
-def analyze_4_5_6_once(p_an: str, translit_lines: str) -> tuple[str, str, str]:
-    """
-    4) Paleografiya + 5) Arxaik lug'at + 6) Izoh
-    Bir marta (overall). Juda uzun bo'lsa, excerpt ishlatadi (xavfsizlik).
-    """
+def analyze_4_5_6_once(p_an: str, translit_lines: str, call_budget: dict, cfg: dict) -> tuple[str, str, str]:
     excerpt = translit_lines.strip()
     if len(excerpt) > 9000:
         excerpt = excerpt[:9000] + "\n... [davomi qisqartirildi: tahlil uchun excerpt] ..."
@@ -661,20 +649,15 @@ def analyze_4_5_6_once(p_an: str, translit_lines: str) -> tuple[str, str, str]:
         + excerpt
     )
 
-    resp = call_gemini_with_retry(prompt, [], tries=3).strip()
+    resp = _call_gemini_guarded(prompt, [], call_budget, cfg, tries=3).strip()
     p = _extract_tag(resp, "P") or ""
     l = _extract_tag(resp, "L") or ""
     i = _extract_tag(resp, "I") or ""
     return p.strip(), l.strip(), i.strip()
 
-def build_analyze_text(p_an: str, translit_lines: str) -> str:
-    """
-    Yakuniy 2-6 bo'limlarni yig'adi.
-    Xavfsizlik: biror qismi bo'sh chiqsa, fallback bo'ladi.
-    """
-    direct, acad = translate_2_3_chunked(translit_lines)
+def build_analyze_text(p_an: str, translit_lines: str, call_budget: dict, cfg: dict) -> str:
+    direct, acad = translate_2_3_chunked(translit_lines, call_budget, cfg)
 
-    # Agar akademik bo'sh qolsa, yana bir marta kichik retry
     if not acad.strip():
         prompt_retry = (
             "Siz Manuscript AI tarjimonisiz.\n"
@@ -686,11 +669,10 @@ def build_analyze_text(p_an: str, translit_lines: str) -> str:
             "TRANSLITERATSIYA:\n"
             + (translit_lines[:4500] if len(translit_lines) > 4500 else translit_lines)
         )
-        acad = call_gemini_with_retry(prompt_retry, [], tries=2).strip()
+        acad = _call_gemini_guarded(prompt_retry, [], call_budget, cfg, tries=2).strip()
 
-    paleo, lex, note = analyze_4_5_6_once(p_an, translit_lines)
+    paleo, lex, note = analyze_4_5_6_once(p_an, translit_lines, call_budget, cfg)
 
-    # Bo'shlar bo'lsa — minimal fallback matn (app ishdan chiqmasin)
     if not direct.strip():
         direct = "[Tarjima chiqmadi]"
     if not paleo.strip():
@@ -700,7 +682,6 @@ def build_analyze_text(p_an: str, translit_lines: str) -> str:
     if not note.strip():
         note = "[Izoh chiqmadi]"
 
-    # 2-6 formatni qat'iy saqlaymiz
     out = (
         "2) To‘g‘ridan-to‘g‘ri tarjima (oddiy o‘zbekcha):\n"
         f"{direct.strip()}\n\n"
@@ -716,39 +697,10 @@ def build_analyze_text(p_an: str, translit_lines: str) -> str:
     return out.strip()
 
 
-# --- AI completeness validator (muammoingiz shu yerda yechiladi) ---
-def has_required_sections(text: str) -> bool:
-    if not text: return False
-    must = [
-        "0) Tashxis",
-        "1) Transliteratsiya",
-        "2) To‘g‘ridan-to‘g‘ri tarjima",
-        "3) Akademik tarjima",
-        "4) Paleografiya"
-    ]
-    t = text.lower()
-    return all(m.lower() in t for m in must)
-
-def transliteration_length_ok(text: str) -> bool:
-    """
-    Qo'lyozma sahifada matn ko'p bo'lsa, transliteratsiya juda qisqa chiqmasin.
-    Juda agressiv bo'lmasin (false-positive bo'lmasligi uchun).
-    """
-    if not text: return False
-    m = re.search(r"1\)\s*Transliteratsiya(.+?)2\)\s*To", text, flags=re.IGNORECASE | re.DOTALL)
-    if not m:
-        return False
-    chunk = m.group(1).strip()
-    # eng kamida 600 ta belgi (ko'p sahifalarda bundan ancha ko'p bo'ladi)
-    return len(chunk) >= 600
-
+# ==========================================
+# PROMPTS
+# ==========================================
 def build_prompts(hint_lang: str, hint_era: str) -> tuple[str, str]:
-    """
-    2 bosqich:
-    A) O'qish (transliteratsiya) ni maksimal to'liq olish
-    B) Shu transliteratsiya asosida tarjima+tahlil
-    """
-    # A) READ prompt
     p_read = (
         "Siz qo‘lyozma o‘qish bo‘yicha mutaxassissiz.\n"
         "Vazifa: rasm ichidagi yozuvni maksimal to‘liq o‘qing.\n"
@@ -770,7 +722,6 @@ def build_prompts(hint_lang: str, hint_era: str) -> tuple[str, str]:
         "- Matnda bo‘lim/ustun bo‘lsa, '--- USTUN 1 ---' kabi ajrating.\n"
     )
 
-    # B) ANALYZE prompt
     p_an = (
         "Siz Manuscript AI mutaxassisiz.\n"
         "Vazifa: berilgan transliteratsiya asosida tarjima va akademik tahlil qiling.\n"
@@ -893,7 +844,6 @@ def render_result_card(md: str, gold: str) -> str:
     <div class="card">{body}</div>
     """
 
-
 # ==========================================
 # 9) WORD EXPORT
 # ==========================================
@@ -939,12 +889,11 @@ def build_word_report(app_name: str, meta: dict, pages: dict[int, str]) -> bytes
 
 
 # ==========================================
-# 10) SIDEBAR (EMAIL-ONLY AUTH + UI)
+# 10) SIDEBAR
 # ==========================================
 with st.sidebar:
     st.markdown("<h2 style='text-align:center;'>📜 MS AI PRO</h2>", unsafe_allow_html=True)
 
-    # --- Email-only login (parolsiz) ---
     st.markdown("### ✉️ Email bilan kirish")
     st.caption("Email kiriting — kreditlar va premium funksiyalar ochiladi.")
 
@@ -985,7 +934,6 @@ with st.sidebar:
             st.session_state.u_email = ""
             st.rerun()
 
-        # History
         with st.expander(f"🧾 History (oxirgi {HISTORY_LIMIT})", expanded=False):
             try:
                 r = db.table("usage_logs") \
@@ -1005,7 +953,6 @@ with st.sidebar:
 
     st.divider()
 
-    # ✅ Google tugma (vaqtincha DISABLED ko‘rinish)
     st.markdown("### Google bilan kirish")
     st.markdown(f"""
     <div style="
@@ -1041,6 +988,17 @@ with st.sidebar:
     st.markdown("### 🧭 Ko'rinish")
     view_mode = st.radio("Natija ko'rinishi:", ["Yonma-yon", "Tabs"], index=0, horizontal=True)
 
+    st.divider()
+    st.markdown("### ⚙️ Tahlil rejimi")
+    analysis_mode = st.radio(
+        "Rejim:",
+        ["Tez", "To‘liq"],
+        index=0,
+        horizontal=True,
+        key="analysis_mode"
+    )
+    st.caption("Tez: natija tezroq. To‘liq: ko‘proq chuqurlik (sekinroq).")
+
 
 # ==========================================
 # 11) MAIN
@@ -1054,7 +1012,6 @@ uploaded_file = st.file_uploader(
     label_visibility="collapsed"
 )
 
-# Empty hero
 if uploaded_file is None:
     st.markdown(f"""
     <div style="
@@ -1091,9 +1048,7 @@ if uploaded_file is None:
     </div>
     """, unsafe_allow_html=True)
 
-
 if uploaded_file:
-    # load/render once per file
     if st.session_state.last_fn != uploaded_file.name:
         with st.spinner("Preparing..."):
             file_bytes = uploaded_file.getvalue()
@@ -1106,13 +1061,11 @@ if uploaded_file:
             st.session_state.page_bytes = pages
             st.session_state.last_fn = uploaded_file.name
 
-            # session reset
             st.session_state.results = {}
             st.session_state.chats = {}
             st.session_state.warn_db = False
             gc.collect()
 
-            # ✅ refreshdan keyin tiklash: agar auth bo'lsa, DB’dan oldingi natijalarni yuklaymiz
             if st.session_state.auth and st.session_state.u_email:
                 restored = load_reports(st.session_state.u_email, st.session_state.last_fn)
                 if restored:
@@ -1126,7 +1079,6 @@ if uploaded_file:
     total_pages = len(processed_pages)
     st.caption(f"Yuklandi: **{total_pages}** sahifa (preview limit: {max_pages}).")
 
-    # page selection
     if total_pages <= 30:
         selected_indices = st.multiselect(
             "Sahifalarni tanlang:",
@@ -1138,13 +1090,11 @@ if uploaded_file:
         page_spec = st.text_input("Sahifalar (masalan: 1-5, 9, 12-20):", value="1")
         selected_indices = parse_pages(page_spec, total_pages)
 
-    # ✅ DEMO limit (email kiritilmagan bo'lsa)
     if not st.session_state.auth:
         if len(selected_indices) > DEMO_LIMIT_PAGES:
             st.warning(f"Demo rejim: maksimal {DEMO_LIMIT_PAGES} sahifa tahlil qilinadi. Premium uchun Email bilan kiring.")
             selected_indices = selected_indices[:DEMO_LIMIT_PAGES]
 
-    # Premium banner (Google emas — Email)
     if not st.session_state.auth:
         st.markdown(f"""
         <div style="
@@ -1165,14 +1115,12 @@ if uploaded_file:
         </div>
         """, unsafe_allow_html=True)
 
-    # Preview
     if not st.session_state.results and selected_indices:
         cols = st.columns(min(len(selected_indices), 4))
         for i, idx in enumerate(selected_indices[:16]):
             with cols[i % min(len(cols), 4)]:
                 st.image(processed_pages[idx], caption=f"Varaq {idx+1}", use_container_width=True)
 
-    # Search in results (wow UX)
     if st.session_state.results:
         q = st.text_input("🔎 Natijalarda qidirish (kalit so‘z):", value="", placeholder="masalan: Muhammad, sana, joy nomi...")
         if q.strip():
@@ -1185,11 +1133,14 @@ if uploaded_file:
             else:
                 st.info("Hozircha topilmadi.")
 
-    # RUN analysis
+    # RUN analysis (PATCHED)
     if st.button("✨ AKADEMIK TAHLILNI BOSHLASH"):
         hint_lang = "" if (auto_detect or lang == "Noma'lum") else lang
         hint_era = "" if (auto_detect or era == "Noma'lum") else era
         p_read, p_an = build_prompts(hint_lang, hint_era)
+
+        cfg = get_analysis_cfg(st.session_state.get("analysis_mode", "Tez"))
+        min_chars = int(cfg.get("min_chars", 420))
 
         total = len(selected_indices)
         done = 0
@@ -1209,12 +1160,11 @@ if uploaded_file:
         upd()
 
         for idx in selected_indices:
-            time.sleep(random.uniform(*BATCH_DELAY_RANGE))  # ✅ 429 kamaytiradi
+            time.sleep(random.uniform(*BATCH_DELAY_RANGE))
             reserved = False
 
             with st.status(f"Sahifa {idx+1}...") as s:
                 try:
-                    # credits only if auth
                     if st.session_state.auth:
                         ok = consume_credit_safe(st.session_state.u_email, 1)
                         if not ok:
@@ -1224,31 +1174,40 @@ if uploaded_file:
                             continue
                         reserved = True
 
+                    call_budget = {"n": 0}
+
                     img_bytes = processed_pages[idx]
                     payload = {"mime_type": "image/jpeg", "data": base64.b64encode(img_bytes).decode("utf-8")}
 
-                    # --- STEP A: READ (transliteratsiya) ---
-                    # 1) Avval oddiy READ (tez)
-                    read_text = call_gemini_with_retry(p_read, [payload], tries=3).strip()
-
-                    # 2) Agar READ formati yo'q yoki translit juda qisqa bo'lsa -> strip OCR bilan kuchaytiramiz
+                    # --- STEP A: READ ---
+                    read_text = _call_gemini_guarded(p_read, [payload], call_budget, cfg, tries=3).strip()
                     translit_lines = extract_translit_lines(read_text)
                     diag_block = extract_diag_block(read_text)
 
-                    if (not has_read_sections(read_text)) or (not translit_min_len_ok(translit_lines, min_chars=600)):
-                        d2, tl2 = read_transliteration_with_strips(p_read, img_bytes, strips_n=OCR_STRIPS_DEFAULT)
+                    if (not has_read_sections(read_text)) or (not translit_min_len_ok(translit_lines, min_chars=min_chars)):
+                        d2, tl2 = read_transliteration_with_strips(
+                            p_read, img_bytes,
+                            strips_n=int(cfg.get("strips_default", 6)),
+                            min_chars=min_chars,
+                            call_budget=call_budget,
+                            cfg=cfg
+                        )
                         if tl2.strip():
                             diag_block = d2 or diag_block
                             translit_lines = tl2
 
-                    # 3) Hali ham qisqa bo'lsa -> strip sonini oshirib oxirgi urinish (1 marta)
-                    if not translit_min_len_ok(translit_lines, min_chars=600):
-                        d3, tl3 = read_transliteration_with_strips(p_read, img_bytes, strips_n=OCR_STRIPS_RETRY)
+                    if not translit_min_len_ok(translit_lines, min_chars=min_chars):
+                        d3, tl3 = read_transliteration_with_strips(
+                            p_read, img_bytes,
+                            strips_n=int(cfg.get("strips_retry", 9)),
+                            min_chars=min_chars,
+                            call_budget=call_budget,
+                            cfg=cfg
+                        )
                         if tl3.strip():
                             diag_block = d3 or diag_block
                             translit_lines = tl3
 
-                    # 4) READ ni tozalab bitta formatga keltiramiz
                     read_text = build_read_text(diag_block, translit_lines)
 
                     if not read_text.strip() or not translit_lines.strip():
@@ -1259,22 +1218,19 @@ if uploaded_file:
                             log_usage(st.session_state.u_email, st.session_state.last_fn, idx, "empty_read")
                         continue
 
-                    # --- STEP B: ANALYZE (2-6 bo'limlar, truncation-safe) ---
-                    # Asosiy tahlilni yig'amiz: (2-6)
+                    # --- STEP B: ANALYZE (2-6) ---
                     try:
-                        an_text = build_analyze_text(p_an, translit_lines)
+                        an_text = build_analyze_text(p_an, translit_lines, call_budget=call_budget, cfg=cfg)
                     except Exception:
-                        # Xavfsiz fallback: eski usul (bir martalik analyze)
                         an_prompt = p_an + "\n\nQuyidagi transliteratsiya bilan ishlang (faqat shunga tayangan holda):\n" + translit_lines
-                        an_text = call_gemini_with_retry(an_prompt, [], tries=3).strip()
+                        an_text = _call_gemini_guarded(an_prompt, [], call_budget, cfg, tries=3).strip()
 
                     final_text = read_text.strip() + "\n\n" + (an_text.strip() or "")
 
-                    # FINAL validator: bo'limlar yetishmasa 1 marta kuchaytirilgan retry
                     if not has_final_sections(final_text):
                         try:
                             p_an2 = p_an + "\n\nMUHIM: Formatni qat'iy saqla. 2-6 bo'limlarning hammasini to'liq yoz."
-                            an_text2 = build_analyze_text(p_an2, translit_lines)
+                            an_text2 = build_analyze_text(p_an2, translit_lines, call_budget=call_budget, cfg=cfg)
                             if an_text2.strip():
                                 final_text = read_text.strip() + "\n\n" + an_text2.strip()
                         except Exception:
@@ -1283,7 +1239,6 @@ if uploaded_file:
                     st.session_state.results[idx] = final_text
                     s.update(label="Tayyor!", state="complete")
 
-                    # persist + logs
                     if st.session_state.auth:
                         save_report(st.session_state.u_email, st.session_state.last_fn, idx, final_text)
                         log_usage(st.session_state.u_email, st.session_state.last_fn, idx, "ok")
@@ -1310,7 +1265,6 @@ if uploaded_file:
         st.divider()
         keys = sorted(st.session_state.results.keys())
 
-        # tez navigatsiya
         jump = st.selectbox("⚡ Tez o‘tish (natija bor sahifalar):", options=keys, format_func=lambda x: f"{x+1}-sahifa")
         keys = [jump] + [k for k in keys if k != jump]
 
@@ -1325,7 +1279,6 @@ if uploaded_file:
                 </div>
                 """
 
-                # Copy button (JS clipboard)
                 copy_js = f"""
                 <button id="copybtn" style="
                     width:100%;
@@ -1417,7 +1370,6 @@ if uploaded_file:
                                             st.session_state.chats[idx].append({"q": user_q, "a": getattr(chat_resp, "text", "") or ""})
                                             st.rerun()
 
-        # Word export
         if st.session_state.auth and st.session_state.results:
             detected = aggregate_detected_meta(st.session_state.results)
             meta = {
